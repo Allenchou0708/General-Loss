@@ -24,7 +24,7 @@ per_cost = Cost(factor=128)
 eps = 1e-8
 
 class GeneralizedLoss(nn.modules.loss._Loss):
-    def __init__(self, factor=10000, reduction='mean') -> None:
+    def __init__(self, factor=1, reduction='mean') -> None:
         super().__init__()
         self.factor = factor
         self.reduction = reduction
@@ -71,13 +71,17 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 B = torch.ones(seq.size(0), device=device).float().view(1, -1, 1) * self.factor
                 
                 mass = max(A.sum().item(), B.sum().item(), 1e-8)
+
+                
+                A = A / (A.sum() + 1e-8)
+                B = B / (B.sum() + 1e-8)
+
                 print(f"A.sum = {A.sum().item()}")
                 print(f"B.sum = {B.sum().item()}")
-                
-                A = A / mass
-                B = B / mass
 
                 oploss, F, G = self.uot(A, A_coord, B, B_coord)
+
+                print(f"oploss = {oploss}")
                 
                 C = self.cost(A_coord, B_coord)
 
