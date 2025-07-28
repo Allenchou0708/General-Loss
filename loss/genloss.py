@@ -24,7 +24,7 @@ per_cost = Cost(factor=128)
 eps = 1e-8
 
 class GeneralizedLoss(nn.modules.loss._Loss):
-    def __init__(self, factor=100, reduction='mean') -> None:
+    def __init__(self, factor=10000, reduction='mean') -> None:
         super().__init__()
         self.factor = factor
         self.reduction = reduction
@@ -70,21 +70,37 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 B_coord = seq[None, :, :]
                 B = torch.ones(seq.size(0), device=device).float().view(1, -1, 1) * self.factor
                 
+                mass = max(A.sum().item(), B.sum().item(), 1e-8)
+                print(f"A.sum = {A.sum().item()}")
+                print(f"B.sum = {B.sum().item()}")
+                
+                A = A / mass
+                B = B / mass
+
                 oploss, F, G = self.uot(A, A_coord, B, B_coord)
                 
                 C = self.cost(A_coord, B_coord)
 
-                tmp = (F.view(1, -1, 1) + G.view(1, 1, -1) - C).detach() / (self.blur ** self.p)
-                print("max exp arg:", tmp.max().item())
-                print("min exp arg:", tmp.min().item())
-                PI = torch.exp((F.view(1, -1, 1) + G.view(1, 1, -1) - C).detach() / (self.blur ** self.p)) * A * B.view(1, 1, -1)
+                # tmp = (F.view(1, -1, 1) + G.view(1, 1, -1) - C).detach() / (self.blur ** self.p)
+                # # print("max exp arg:", tmp.max().item())
+                # # print("min exp arg:", tmp.min().item())
+                exp_term = ((F.view(1, -1, 1) + G.view(1, 1, -1) - C)) / (self.blur ** self.p)
+                exp_term = exp_term.clamp(max=10)  # 防止 torch.exp 爆炸
+                print(f"exp_term = {exp_term.max().item()}")
+                PI = torch.exp(exp_term) * A * B.view(1, 1, -1)
+
+                
+                # PI = torch.exp((F.view(1, -1, 1) + G.view(1, 1, -1) - C).detach() / (self.blur ** self.p)) * A * B.view(1, 1, -1)
                 
                 PI_clamped = PI.clamp(min=1e-8)  # 避免 log(0)
                 entropy += torch.mean(PI_clamped * torch.log(PI_clamped))
 
+
                 emd_loss += torch.mean(oploss)
                 point_loss += self.pointLoss(PI.sum(dim=1).view(1, -1, 1), B)
-                pixel_loss += self.pixelLoss(PI.sum(dim=2).detach().view(1, -1, 1), A)
+                pixel_loss += self.pixelLoss(PI.sum(dim=2).view(1, -1, 1), A)
+
+        print(f"emd_loss = {emd_loss}, point_loss={self.tau * point_loss}, pixel_loss={self.tau * pixel_loss}, entropy={self.blur * entropy}")
                 
         loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.blur * entropy) 
         return loss
