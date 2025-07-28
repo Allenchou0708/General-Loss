@@ -35,19 +35,23 @@ class GeneralizedLoss(nn.modules.loss._Loss):
         self.scaling = 0.75
         self.reach = 0.5
         self.p = 1
-        self.uot = SamplesLoss(blur=self.blur, scaling=self.scaling, debias=False, backend='tensorized', cost=self.cost, reach=self.reach, p=self.p)
+        self.uot = SamplesLoss(blur=self.blur, scaling=self.scaling, debias=False, backend='tensorized', cost=self.cost, reach=self.reach, p=self.p).to("cpu")
         self.pointLoss = nn.L1Loss(reduction=reduction)
         self.pixelLoss = nn.MSELoss(reduction=reduction)
 
         self.down = 1
 
     def forward(self, dens, dots, box_size=None):
+        device = dots.device  # 或 seq.device
+
         bs = dens.size(0)
         point_loss, pixel_loss, emd_loss = 0, 0, 0
         entropy = 0
         for i in range(bs):
             den = dens[i, 0]
             seq = torch.nonzero(dots[i, 0])
+
+
             if box_size is not None:
                 self.cost.box_scale = torch.sigmoid((box_size[i] - 64) / 32) * 2 + 1
             else:
@@ -57,24 +61,32 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 point_loss += torch.abs(den).mean()
                 pixel_loss += torch.abs(den).mean()
                 emd_loss += torch.abs(den).mean()
+                print(f"den have nothing")
             else:
                 A, A_coord = self.den2coord(den)
                 A_coord = A_coord.reshape(1, -1, 2)
                 A = A.reshape(1, -1, 1)
 
                 B_coord = seq[None, :, :]
-                B = torch.ones(seq.size(0)).float().cpu().view(1, -1, 1) * self.factor
+                B = torch.ones(seq.size(0), device=device).float().view(1, -1, 1) * self.factor
                 
                 oploss, F, G = self.uot(A, A_coord, B, B_coord)
                 
                 C = self.cost(A_coord, B_coord)
+
+                tmp = (F.view(1, -1, 1) + G.view(1, 1, -1) - C).detach() / (self.blur ** self.p)
+                print("max exp arg:", tmp.max().item())
+                print("min exp arg:", tmp.min().item())
                 PI = torch.exp((F.view(1, -1, 1) + G.view(1, 1, -1) - C).detach() / (self.blur ** self.p)) * A * B.view(1, 1, -1)
-                entropy += torch.mean((1e-20+PI) * torch.log(1e-20+PI))
+                
+                PI_clamped = PI.clamp(min=1e-8)  # 避免 log(0)
+                entropy += torch.mean(PI_clamped * torch.log(PI_clamped))
+
                 emd_loss += torch.mean(oploss)
                 point_loss += self.pointLoss(PI.sum(dim=1).view(1, -1, 1), B)
                 pixel_loss += self.pixelLoss(PI.sum(dim=2).detach().view(1, -1, 1), A)
                 
-        loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.blur * entropy) / bs
+        loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.blur * entropy) 
         return loss
     
     def den2coord(self, denmap):
