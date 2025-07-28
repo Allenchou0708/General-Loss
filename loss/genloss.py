@@ -21,6 +21,27 @@ def gaussian_blur(input, kernel_size=5, sigma=1.0):
     return F.conv2d(input, kernel_2d, padding=padding, groups=channels)
 
 
+def weighted_inverted_huber_loss(pred, target, weights, delta=1.0):
+    error = pred - target
+    abs_error = error.abs()
+
+    l1_mask = abs_error <= delta
+    l2_mask = ~l1_mask
+
+    l1_loss = abs_error[l1_mask]
+    l2_loss = (error[l2_mask] ** 2 + delta ** 2) / (2 * delta)
+
+    # 分開加權
+    weighted_l1 = l1_loss.sum() * 0.000001
+    weighted_l2 = l2_loss.sum() * 0.0001
+
+    loss = weighted_l1 + weighted_l2
+
+    print(f"weighted_l1 = {weighted_l1} / {l1_loss.numel()}")
+    print(f"weighted_l2 = {weighted_l2} / {l2_loss.numel()}")
+
+    return loss
+
 class Cost:
     def __init__(self, factor=128) -> None:
         self.factor = factor
@@ -120,23 +141,29 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 # --- 對 B 進行 blur ---
                 B_blurred = gaussian_blur(B, kernel_size=5, sigma=1.0)
 
-                # --- Loss 計算 ---
-                pred = PI.sum(dim=1).view(1, -1, 1)
-                target = B_blurred.view(1, -1, 1)  # flatten 以對應 pred
-
-                # 權重 mask
-                weights = torch.where(target > 0, 0.0001, 0.000001)
-
-                # 不做 mean，保留每個位置的 loss
-                point_loss += weights * torch.abs(pred - target)
+                # 因為要讓 pred 與 target 越近越好，所以這邊用 weighted inverse huber loss
 
                 # point_loss += self.pointLoss(PI.sum(dim=1).view(1, -1, 1), B)
                 pixel_loss += self.pixelLoss(PI.sum(dim=2).view(1, -1, 1), A)
 
+                pred = PI.sum(dim=1).view(1, -1, 1)
+                target = B_blurred.view(1, -1, 1)
+
+                weights = torch.where(target > 0, 0.0001, 0.000001)
+
+                # 計算加權 loss
+                # loss_contrib = weights * torch.abs(pred - target)
+                point_loss = point_loss + weighted_inverted_huber_loss(pred, target, weights, delta=0.5)
+
+                # 累加進 scalar point_loss（用 sum 或 mean）
+                # point_loss = point_loss + loss_contrib.sum()
+
         print(f"emd_loss = {emd_loss}, point_loss={self.tau * point_loss}, pixel_loss={self.tau * pixel_loss}, entropy={self.blur * entropy}")
-        print("I am gaussian blur + weighted")
+        print("I am gaussian blur + weighted inverted_huber_loss")
                 
         loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.blur * entropy) 
+        
+        
         return loss
     
     def den2coord(self, denmap): #只拿出 1，因為 dot map
