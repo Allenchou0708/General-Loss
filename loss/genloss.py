@@ -1,14 +1,30 @@
-# -*- coding: utf-8 -*-
+#@title loss_2.py
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as tF
 from .geomloss import SamplesLoss
+import torch.nn.functional as F
+
+# --- 對 B 做 Gaussian blur ---
+# kernel_size 建議奇數（如 5），sigma 可調整平滑程度
+def gaussian_blur(input, kernel_size=5, sigma=1.0):
+    channels = input.shape[1]
+    padding = kernel_size // 2
+    x = torch.arange(-padding, padding + 1, dtype=torch.float32, device=input.device)
+    gauss = torch.exp(-0.5 * (x / sigma) ** 2)
+    gauss = gauss / gauss.sum()
+    kernel_1d = gauss.view(1, 1, -1)  # (1, 1, K)
+    kernel_2d = kernel_1d.T @ kernel_1d  # (K, K)
+    kernel_2d = kernel_2d.view(1, 1, kernel_size, kernel_size).repeat(channels, 1, 1, 1)
+
+    return F.conv2d(input, kernel_2d, padding=padding, groups=channels)
+
 
 class Cost:
     def __init__(self, factor=128) -> None:
         self.factor = factor
-        self.box_scale = torch.tensor([2.0, 2.0])  # 用tensor
+        self.normalized_coord = torch.tensor([2.0, 2.0])  # 用tensor
 
     def __call__(self, x, y):
         # 假設 x,y shape 都是 (B, N, 2)
@@ -16,7 +32,7 @@ class Cost:
         y_row = y.unsqueeze(-3)  # (B, 1, M, 2)
         
         # 加入 box_scale 縮放，避免距離過大
-        scale = self.box_scale.to(x.device)
+        scale = self.normalized_coord.to(x.device)
         diff = (x_col - y_row) / scale  # normalize 距離
         C = torch.sum(diff ** 2, dim=-1)
         return C
@@ -33,7 +49,7 @@ class GeneralizedLoss(nn.modules.loss._Loss):
         self.tau = 5
 
         self.cost = per_cost
-        self.blur = 0.01
+        self.blur = 0.1
         self.scaling = 0.75
         self.reach = 0.5
         self.p = 1
@@ -63,7 +79,7 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 point_loss += torch.abs(den).mean()
                 pixel_loss += torch.abs(den).mean()
                 emd_loss += torch.abs(den).mean()
-                print(f"den have nothing")
+                # print(f"den have nothing")
             else:
                 A, A_coord = self.den2coord(den)
                 A_coord = A_coord.reshape(1, -1, 2)
@@ -80,7 +96,7 @@ class GeneralizedLoss(nn.modules.loss._Loss):
 
                 oploss, F, G = self.uot(A, A_coord, B, B_coord)
 
-                print(f"oploss = {oploss}")
+                # print(f"oploss = {oploss}")
                 
                 C = self.cost(A_coord, B_coord)
 
@@ -88,8 +104,8 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 # # print("max exp arg:", tmp.max().item())
                 # # print("min exp arg:", tmp.min().item())
                 exp_term = ((F.view(1, -1, 1) + G.view(1, 1, -1) - C)) / (self.blur ** self.p)
-                exp_term = exp_term.clamp(max=10)  # 防止 torch.exp 爆炸
-                print(f"exp_term = {exp_term.max().item()}")
+                exp_term = exp_term.clamp(max=20)  # 防止 torch.exp 爆炸
+                # print(f"exp_term = {exp_term.max().item()}")
                 PI = torch.exp(exp_term) * A * B.view(1, 1, -1)
 
                 
@@ -100,10 +116,25 @@ class GeneralizedLoss(nn.modules.loss._Loss):
 
 
                 emd_loss += torch.mean(oploss)
-                point_loss += self.pointLoss(PI.sum(dim=1).view(1, -1, 1), B)
+
+                # --- 對 B 進行 blur ---
+                B_blurred = gaussian_blur(B, kernel_size=5, sigma=1.0)
+
+                # --- Loss 計算 ---
+                pred = PI.sum(dim=1).view(1, -1, 1)
+                target = B_blurred.view(1, -1, 1)  # flatten 以對應 pred
+
+                # 權重 mask
+                weights = torch.where(target > 0, 0.0001, 0.000001)
+
+                # 不做 mean，保留每個位置的 loss
+                point_loss += weights * torch.abs(pred - target)
+
+                # point_loss += self.pointLoss(PI.sum(dim=1).view(1, -1, 1), B)
                 pixel_loss += self.pixelLoss(PI.sum(dim=2).view(1, -1, 1), A)
 
         print(f"emd_loss = {emd_loss}, point_loss={self.tau * point_loss}, pixel_loss={self.tau * pixel_loss}, entropy={self.blur * entropy}")
+        print("I am gaussian blur + weighted")
                 
         loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.blur * entropy) 
         return loss
