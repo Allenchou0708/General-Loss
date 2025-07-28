@@ -8,17 +8,19 @@ from .geomloss import SamplesLoss
 class Cost:
     def __init__(self, factor=128) -> None:
         self.factor = factor
-        self.box_scale = [2, 2]
+        self.box_scale = torch.tensor([2.0, 2.0])  # 用tensor
 
     def __call__(self, x, y):
-        # x: (B, N, 2), y: (B, M, 2)
+        # 假設 x,y shape 都是 (B, N, 2)
         x_col = x.unsqueeze(-2)  # (B, N, 1, 2)
         y_row = y.unsqueeze(-3)  # (B, 1, M, 2)
-
-        # Broadcasting to compute pairwise distance
-        C = torch.sum((x_col - y_row) ** 2, dim=-1)  # (B, N, M)
-
+        
+        # 加入 box_scale 縮放，避免距離過大
+        scale = self.box_scale.to(x.device)
+        diff = (x_col - y_row) / scale  # normalize 距離
+        C = torch.sum(diff ** 2, dim=-1)
         return C
+
 
 per_cost = Cost(factor=128)
 eps = 1e-8
@@ -49,7 +51,7 @@ class GeneralizedLoss(nn.modules.loss._Loss):
         entropy = 0
         for i in range(bs):
             den = dens[i, 0]
-            seq = torch.nonzero(dots[i, 0])
+            seq = torch.nonzero(dots[i, 0]) # N * 2
 
 
             if box_size is not None:
@@ -67,17 +69,14 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 A_coord = A_coord.reshape(1, -1, 2)
                 A = A.reshape(1, -1, 1)
 
-                B_coord = seq[None, :, :]
-                B = torch.ones(seq.size(0), device=device).float().view(1, -1, 1) * self.factor
-                
-                mass = max(A.sum().item(), B.sum().item(), 1e-8)
-
+                B_coord = seq[None, :, :] # 1 * N * 2
+                B = torch.ones(seq.size(0), device=device).float().view(1, -1, 1) * self.factor # 1 * N * 1
                 
                 A = A / (A.sum() + 1e-8)
                 B = B / (B.sum() + 1e-8)
 
-                print(f"A.sum = {A.sum().item()}")
-                print(f"B.sum = {B.sum().item()}")
+                # print(f"A.sum = {A.sum().item()}")
+                # print(f"B.sum = {B.sum().item()}")
 
                 oploss, F, G = self.uot(A, A_coord, B, B_coord)
 
@@ -109,9 +108,9 @@ class GeneralizedLoss(nn.modules.loss._Loss):
         loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.blur * entropy) 
         return loss
     
-    def den2coord(self, denmap):
+    def den2coord(self, denmap): #只拿出 1，因為 dot map
         assert denmap.dim() == 2, f"denmap.shape = {denmap.shape}, whose dim is not 2"
-        coord = torch.nonzero(denmap)
+        coord = torch.nonzero(denmap) # (N, 2) N = H * W, 2 先 Y 再 X 座標
         denval = denmap[coord[:, 0], coord[:, 1]]
         return denval, coord
     

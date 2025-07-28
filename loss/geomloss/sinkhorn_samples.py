@@ -33,7 +33,7 @@ def softmin_tensorized(ε, C, f):
     return - ε * ( f.view(B,1,-1) - C/ε ).logsumexp(2).view(B, -1, 1)
 
 def sinkhorn_tensorized(α, x, β, y, p=2, blur=.05, reach=None, diameter=None, scaling=.5, cost=None, 
-                        debias = True, potentials = False, **kwargs):
+                        debias = True, potentials = False, **kwargs): #
     
     B, N, D = x.shape
     _, M, _ = y.shape
@@ -41,7 +41,7 @@ def sinkhorn_tensorized(α, x, β, y, p=2, blur=.05, reach=None, diameter=None, 
     if cost is None:
         cost = cost_routines[p]
         
-    C_xx, C_yy = ( cost( x, x.detach()), cost( y, y.detach()) ) if debias else (None, None)  # (B,N,N), (B,M,M)
+    C_xx, C_yy = ( cost( x, x.detach()), cost( y, y.detach()) ) if debias else (None, None)  # (B,N,N), (B,M,M) #
     C_xy, C_yx = ( cost( x, y.detach()), cost( y, x.detach()) )  # (B,N,M), (B,M,N)
 
 

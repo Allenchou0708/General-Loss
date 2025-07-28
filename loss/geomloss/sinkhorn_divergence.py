@@ -64,7 +64,7 @@ def epsilon_schedule(p, diameter, blur, scaling):
 
 def scaling_parameters( x, y, p, blur, reach, diameter, scaling):
 
-    if diameter is None:
+    if diameter is None: # None
         D = x.shape[-1]
         diameter = max_diameter(x.view(-1,D), y.view(-1,D))
 
