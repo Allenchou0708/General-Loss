@@ -63,7 +63,7 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 A = A.reshape(1, -1, 1)
 
                 B_coord = seq[None, :, :]
-                B = torch.ones(seq.size(0)).float().cuda().view(1, -1, 1) * self.factor
+                B = torch.ones(seq.size(0)).float().cpu().view(1, -1, 1) * self.factor
                 
                 oploss, F, G = self.uot(A, A_coord, B, B_coord)
                 
