@@ -21,24 +21,35 @@ def gaussian_blur(input, kernel_size=5, sigma=1.0):
     return F.conv2d(input, kernel_2d, padding=padding, groups=channels)
 
 
-def weighted_inverted_huber_loss(pred, target, weights, delta=1.0):
+def weighted_inverted_huber_loss(pred, target, weights, loss_type, delta=1.0):
+    
+    
+
     error = pred - target
+
+    
     abs_error = error.abs()
 
+    # print(f"error_max = {abs_error.max()}, error_min = {abs_error.min()}")
+
+
     l1_mask = abs_error <= delta
+
     l2_mask = ~l1_mask
 
     l1_loss = abs_error[l1_mask]
     l2_loss = (error[l2_mask] ** 2 + delta ** 2) / (2 * delta)
 
     # 分開加權
-    weighted_l1 = l1_loss.sum() * 0.000001
-    weighted_l2 = l2_loss.sum() * 0.0001
+    weighted_l1 = l1_loss.sum() * 0.01
+    weighted_l2 = l2_loss.sum() * 1
 
     loss = weighted_l1 + weighted_l2
 
-    print(f"weighted_l1 = {weighted_l1} / {l1_loss.numel()}")
-    print(f"weighted_l2 = {weighted_l2} / {l2_loss.numel()}")
+    print(f"{loss_type} => weighted_l1 = {weighted_l1} / {l1_loss.numel()}")
+    print(f"{loss_type} => weighted_l2 = {weighted_l2} / {l2_loss.numel()}")
+
+    # l1_loss.numel() : 列出這個 tensor 有多少元素
 
     return loss
 
@@ -51,7 +62,7 @@ class Cost:
         # 假設 x,y shape 都是 (B, N, 2)
         x_col = x.unsqueeze(-2)  # (B, N, 1, 2)
         y_row = y.unsqueeze(-3)  # (B, 1, M, 2)
-        
+
         # 加入 box_scale 縮放，避免距離過大
         scale = self.normalized_coord.to(x.device)
         diff = (x_col - y_row) / scale  # normalize 距離
@@ -108,7 +119,7 @@ class GeneralizedLoss(nn.modules.loss._Loss):
 
                 B_coord = seq[None, :, :] # 1 * N * 2
                 B = torch.ones(seq.size(0), device=device).float().view(1, -1, 1) * self.factor # 1 * N * 1
-                
+
                 A = A / (A.sum() + 1e-8)
                 B = B / (B.sum() + 1e-8)
 
@@ -118,7 +129,7 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 oploss, F, G = self.uot(A, A_coord, B, B_coord)
 
                 # print(f"oploss = {oploss}")
-                
+
                 C = self.cost(A_coord, B_coord)
 
                 # tmp = (F.view(1, -1, 1) + G.view(1, 1, -1) - C).detach() / (self.blur ** self.p)
@@ -129,9 +140,9 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 # print(f"exp_term = {exp_term.max().item()}")
                 PI = torch.exp(exp_term) * A * B.view(1, 1, -1)
 
-                
+
                 # PI = torch.exp((F.view(1, -1, 1) + G.view(1, 1, -1) - C).detach() / (self.blur ** self.p)) * A * B.view(1, 1, -1)
-                
+
                 PI_clamped = PI.clamp(min=1e-8)  # 避免 log(0)
                 entropy += torch.mean(PI_clamped * torch.log(PI_clamped))
 
@@ -139,36 +150,60 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 emd_loss += torch.mean(oploss)
 
                 # --- 對 B 進行 blur ---
-                B_blurred = gaussian_blur(B, kernel_size=5, sigma=1.0)
+
+                # blur dot map
+                dot_map = torch.zeros_like(den)
+                dot_map[seq[:, 0], seq[:, 1]] = 1.0
+                dot_map = dot_map.unsqueeze(0).unsqueeze(0)
+
+                # blur 後的 map
+                dot_map_blurred = gaussian_blur(dot_map, kernel_size=5, sigma=1.0)[0, 0]  # (H, W)
+
+                # 重新找非零點位置（避免 seq 有值但 blur 後為 0）
+                blurred_seq = torch.nonzero(dot_map_blurred, as_tuple=False)  # shape (N, 2)
+
+                # 抽出值
+                B_blurred = dot_map_blurred[blurred_seq[:, 0], blurred_seq[:, 1]].view(1, -1, 1)
+
+                # 更新 PI & pred/target
+                PI_B = torch.exp(exp_term) * A * B_blurred.view(1, 1, -1)
+                pred = PI_B.sum(dim=1).view(1, -1, 1)        # shape (1, N, 1)
+                target = B_blurred          # shape (1, N, 1)
+
+  
+
+
 
                 # 因為要讓 pred 與 target 越近越好，所以這邊用 weighted inverse huber loss
 
                 # point_loss += self.pointLoss(PI.sum(dim=1).view(1, -1, 1), B)
-                pixel_loss += self.pixelLoss(PI.sum(dim=2).view(1, -1, 1), A)
-
-                pred = PI.sum(dim=1).view(1, -1, 1)
-                target = B_blurred.view(1, -1, 1)
+                # pixel_loss += self.pixelLoss(PI.sum(dim=2).view(1, -1, 1), A)
 
                 weights = torch.where(target > 0, 0.0001, 0.000001)
 
                 # 計算加權 loss
                 # loss_contrib = weights * torch.abs(pred - target)
-                point_loss = point_loss + weighted_inverted_huber_loss(pred, target, weights, delta=0.5)
+                point_loss = point_loss + weighted_inverted_huber_loss(pred, target, weights, "point_loss", delta=0.01)
+
+                pred_a = PI.sum(dim=2).view(1, -1, 1)
+                target_a = A.view(1, -1, 1)
+                weights_a = torch.where(target > 0, 0.01, 0.0001)  # 或調整你認為合適的值
+                pixel_loss = pixel_loss + weighted_inverted_huber_loss(pred_a, target_a, weights_a, "pixel_loss", delta=0.0001)
 
                 # 累加進 scalar point_loss（用 sum 或 mean）
                 # point_loss = point_loss + loss_contrib.sum()
 
         print(f"emd_loss = {emd_loss}, point_loss={self.tau * point_loss}, pixel_loss={self.tau * pixel_loss}, entropy={self.blur * entropy}")
         print("I am gaussian blur + weighted inverted_huber_loss")
-                
-        loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.blur * entropy) 
-        
-        
+
+        loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.blur * entropy)
+
+
         return loss
-    
+
     def den2coord(self, denmap): #只拿出 1，因為 dot map
         assert denmap.dim() == 2, f"denmap.shape = {denmap.shape}, whose dim is not 2"
         coord = torch.nonzero(denmap) # (N, 2) N = H * W, 2 先 Y 再 X 座標
         denval = denmap[coord[:, 0], coord[:, 1]]
         return denval, coord
-    
+
