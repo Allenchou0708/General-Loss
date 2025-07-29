@@ -21,7 +21,7 @@ def gaussian_blur(input, kernel_size=5, sigma=1.0):
     return F.conv2d(input, kernel_2d, padding=padding, groups=channels)
 
 
-def weighted_inverted_huber_loss(pred, target, weights, loss_type, delta=1.0):
+def weighted_inverted_huber_loss(pred, target, weights, loss_type, l1_weight = 0.01, l2_weight = 1, delta=1.0):
     
     
 
@@ -41,8 +41,8 @@ def weighted_inverted_huber_loss(pred, target, weights, loss_type, delta=1.0):
     l2_loss = (error[l2_mask] ** 2 + delta ** 2) / (2 * delta)
 
     # 分開加權
-    weighted_l1 = l1_loss.sum() * 0.01
-    weighted_l2 = l2_loss.sum() * 1
+    weighted_l1 = l1_loss.sum() * l1_weight
+    weighted_l2 = l2_loss.sum() * l2_weight
 
     loss = weighted_l1 + weighted_l2
 
@@ -88,6 +88,7 @@ class GeneralizedLoss(nn.modules.loss._Loss):
         self.uot = SamplesLoss(blur=self.blur, scaling=self.scaling, debias=False, backend='tensorized', cost=self.cost, reach=self.reach, p=self.p).to("cpu")
         self.pointLoss = nn.L1Loss(reduction=reduction)
         self.pixelLoss = nn.MSELoss(reduction=reduction)
+        self.entropy_loss = 0.1
 
         self.down = 1
 
@@ -139,12 +140,22 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 exp_term = exp_term.clamp(max=20)  # 防止 torch.exp 爆炸
                 # print(f"exp_term = {exp_term.max().item()}")
                 PI = torch.exp(exp_term) * A * B.view(1, 1, -1)
+                
+                print(f"PI.sum() = {PI.sum()}")
 
+                PI_sum = PI.sum(dim=(1, 2), keepdim=True)
+                PI = PI / (PI_sum + 1e-8)  # 避免除以極小數
 
+                log_PI = torch.log(PI + 1e-15)
                 # PI = torch.exp((F.view(1, -1, 1) + G.view(1, 1, -1) - C).detach() / (self.blur ** self.p)) * A * B.view(1, 1, -1)
 
                 PI_clamped = PI.clamp(min=1e-8)  # 避免 log(0)
-                entropy += torch.mean(PI_clamped * torch.log(PI_clamped))
+                # entropy += torch.mean(PI_clamped * torch.log(PI_clamped))
+                print(f"PI_clamped * log_PI shape = {(PI_clamped * log_PI).shape}")
+                entropy += -1 * torch.sum(PI_clamped * log_PI)
+
+                # print(f"oploss.shape = {oploss.shape}")
+                # print(f"oploss.sum = {oploss.sum()}")
 
 
                 emd_loss += torch.mean(oploss)
@@ -183,9 +194,10 @@ class GeneralizedLoss(nn.modules.loss._Loss):
 
                 # 計算加權 loss
                 # loss_contrib = weights * torch.abs(pred - target)
-                point_loss = point_loss + weighted_inverted_huber_loss(pred, target, weights, "point_loss", delta=0.01)
+                point_loss = point_loss + weighted_inverted_huber_loss(pred, target, weights, "point_loss", l2_weight=0.1, delta=0.05)
 
-                pred_a = PI.sum(dim=2).view(1, -1, 1)
+                PI_A = torch.exp(exp_term) * A * B.view(1, 1, -1)
+                pred_a = PI_A.sum(dim=2).view(1, -1, 1)
                 target_a = A.view(1, -1, 1)
                 weights_a = torch.where(target > 0, 0.01, 0.0001)  # 或調整你認為合適的值
                 pixel_loss = pixel_loss + weighted_inverted_huber_loss(pred_a, target_a, weights_a, "pixel_loss", delta=0.0001)
@@ -194,9 +206,9 @@ class GeneralizedLoss(nn.modules.loss._Loss):
                 # point_loss = point_loss + loss_contrib.sum()
 
         print(f"emd_loss = {emd_loss}, point_loss={self.tau * point_loss}, pixel_loss={self.tau * pixel_loss}, entropy={self.blur * entropy}")
-        print("I am gaussian blur + weighted inverted_huber_loss")
+        print("I am gaussian blur + weighted inverted_huber_loss + normalized entropy")
 
-        loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.blur * entropy)
+        loss = (emd_loss + self.tau * (point_loss + pixel_loss) + self.entropy_loss * entropy)
 
 
         return loss
